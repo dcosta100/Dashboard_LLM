@@ -12,7 +12,7 @@ import dash
 # =========================
 # Dados
 # =========================
-CSV_PATH = "comparacao_medidas_v3.csv"
+CSV_PATH = "comparacao_medidas_v5.csv"
 df = pd.read_csv(CSV_PATH)
 
 # Corrigir booleanos se necessário
