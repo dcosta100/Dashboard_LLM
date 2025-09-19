@@ -12,19 +12,23 @@ import dash
 # =========================
 # Dados
 # =========================
-CSV_PATH_V5 = "comparacao_medidas_17092025.csv"
-CSV_PATH_V4 = "comparacao_medidas_v5.csv"
-# CSV_PATH_V4 = "comparacao_medidas_v4.csv"
+CSV_PATH_V3 = "data/comparacao_medidas_17092025.csv"
+CSV_PATH_V2 = "data/comparacao_medidas_v5.csv"
+CSV_PATH_V1 = "data/comparacao_medidas_v4.csv"
 
 # v5 = base principal (todo o app usa v5 e parser atual)
-df = pd.read_csv(CSV_PATH_V5)
+df = pd.read_csv(CSV_PATH_V3)
 
-# v4 = usado apenas para o gráfico de % OK (LLM v4)
+# v2 e v1 = usados apenas para os gráficos de % OK
 try:
-    df_v4 = pd.read_csv(CSV_PATH_V4)
+    df_v2 = pd.read_csv(CSV_PATH_V2)
 except Exception:
-    # Se não existir, mantém vazio
-    df_v4 = pd.DataFrame(columns=["ClassificationType", "Medidas_llm"])
+    df_v2 = pd.DataFrame(columns=["ClassificationType", "Medidas_llm"])
+
+try:
+    df_v1 = pd.read_csv(CSV_PATH_V1)
+except Exception:
+    df_v1 = pd.DataFrame(columns=["ClassificationType", "Medidas_llm"])
 
 # Corrigir booleanos se necessário (v5)
 for col in ["Atingiu_minimo", "Atingiu_mediana", "Atingiu_maximo"]:
@@ -138,6 +142,87 @@ def pct_by_classification_split_versioned(df_v5: pd.DataFrame, df_v4: pd.DataFra
     g["rank_key"] = (g["pct_llm_v5"] + g["pct_par_v5"]).fillna(0)
     g = g.sort_values("rank_key", ascending=False).drop(columns=["rank_key"])
     return g
+
+# =========================
+# 2. FUNÇÃO PRINCIPAL PARA 3 VERSÕES
+# =========================
+
+def pct_by_classification_split_3versions(df_v3, df_v2, df_v1, mode):
+    """
+    Retorna um DF por classe com %OK de:
+      - LLM v1 (usando Medidas_llm do v1 comparado ao esperado do v3 para o mode)
+      - LLM v2 (usando Medidas_llm do v2 comparado ao esperado do v3 para o mode)
+      - LLM v3
+      - Parser v3
+    Filtra para classes onde o esperado (no v3) > 0 no mode.
+    """
+    _, exp_col, _label = MODE_TO_FLAG[mode]
+
+    # Mapa de esperado por classe (v3)
+    exp_map = (
+        df_v3.groupby("ClassificationType")[exp_col]
+        .max()
+        .rename("Expected")
+        .reset_index()
+    )
+
+    # ---- v3: calcula % ok por classe para LLM e Parser
+    d3 = df_v3.copy()
+    d3["Medidas_llm"] = pd.to_numeric(d3["Medidas_llm"], errors="coerce").fillna(0)
+    d3["Medidas_parser"] = pd.to_numeric(d3["Medidas_parser"], errors="coerce").fillna(0)
+    d3 = d3.merge(exp_map, on="ClassificationType", how="left")
+    d3["Expected"] = pd.to_numeric(d3["Expected"], errors="coerce").fillna(0)
+
+    d3["ok_llm_v3"] = d3["Medidas_llm"] >= d3["Expected"]
+    d3["ok_par_v3"] = d3["Medidas_parser"] >= d3["Expected"]
+
+    g3 = d3.groupby("ClassificationType").agg(
+        pct_llm_v3=("ok_llm_v3", "mean"),
+        pct_par_v3=("ok_par_v3", "mean"),
+        Expected=("Expected", "max"),
+    ).reset_index()
+
+    # ---- v2: junta esperado por classe e calcula % ok LLM
+    if not df_v2.empty and "Medidas_llm" in df_v2.columns:
+        d2 = df_v2[["ClassificationType", "Medidas_llm"]].copy()
+        d2["Medidas_llm"] = pd.to_numeric(d2["Medidas_llm"], errors="coerce").fillna(0)
+        d2 = d2.merge(exp_map, on="ClassificationType", how="left")
+        d2["Expected"] = pd.to_numeric(d2["Expected"], errors="coerce").fillna(0)
+        d2["ok_llm_v2"] = d2["Medidas_llm"] >= d2["Expected"]
+        g2 = d2.groupby("ClassificationType").agg(pct_llm_v2=("ok_llm_v2", "mean")).reset_index()
+    else:
+        g2 = pd.DataFrame(columns=["ClassificationType", "pct_llm_v2"])
+
+    # ---- v1: junta esperado por classe e calcula % ok LLM
+    if not df_v1.empty and "Medidas_llm" in df_v1.columns:
+        d1 = df_v1[["ClassificationType", "Medidas_llm"]].copy()
+        d1["Medidas_llm"] = pd.to_numeric(d1["Medidas_llm"], errors="coerce").fillna(0)
+        d1 = d1.merge(exp_map, on="ClassificationType", how="left")
+        d1["Expected"] = pd.to_numeric(d1["Expected"], errors="coerce").fillna(0)
+        d1["ok_llm_v1"] = d1["Medidas_llm"] >= d1["Expected"]
+        g1 = d1.groupby("ClassificationType").agg(pct_llm_v1=("ok_llm_v1", "mean")).reset_index()
+    else:
+        g1 = pd.DataFrame(columns=["ClassificationType", "pct_llm_v1"])
+
+    # ---- merge v3 + v2 + v1 por classe
+    g = g3.merge(g2, on="ClassificationType", how="left")
+    g = g.merge(g1, on="ClassificationType", how="left")
+    
+    g["pct_llm_v2"] = g["pct_llm_v2"].fillna(0.0)
+    g["pct_llm_v1"] = g["pct_llm_v1"].fillna(0.0)
+
+    # filtra classes com Expected > 0 (no v3)
+    g = g[g["Expected"] > 0].copy()
+
+    # formata %
+    for c in ["pct_llm_v1", "pct_llm_v2", "pct_llm_v3", "pct_par_v3"]:
+        g[c] = (g[c] * 100).round(1)
+
+    # ordena por "destaque" do v3 (média entre llm e parser v3)
+    g["rank_key"] = (g["pct_llm_v3"] + g["pct_par_v3"]).fillna(0)
+    g = g.sort_values("rank_key", ascending=False).drop(columns=["rank_key"])
+    return g
+
 
 # =========================
 # Estilos
@@ -589,25 +674,36 @@ def build_sections(modes):
 def update_bar_section(modes_selected, this_id):
     mode = this_id["mode"]
 
-    # Dataframe combinado com %OK das três séries, já filtrado por Expected>0 (v5)
-    g = pct_by_classification_split_versioned(df, df_v4, mode)
+    # Dataframe combinado com %OK das QUATRO séries
+    g = pct_by_classification_split_3versions(df, df_v2, df_v1, mode)
 
-    # Long format
+    # Long format com 4 séries
     g_long = g.melt(
         id_vars=["ClassificationType"],
-        value_vars=["pct_llm_v4", "pct_llm_v5", "pct_par_v5"],
+        value_vars=["pct_llm_v1", "pct_llm_v2", "pct_llm_v3", "pct_par_v3"],
         var_name="Fonte",
         value_name="% OK"
     )
+    
+    # Mapeamento mais claro dos nomes
     g_long["Fonte"] = g_long["Fonte"].map({
-        "pct_llm_v4": "LLM v4",
-        "pct_llm_v5": "LLM v5",
-        "pct_par_v5": "Parser v5"
+        "pct_llm_v1": "LLM v1",
+        "pct_llm_v2": "LLM v2", 
+        "pct_llm_v3": "LLM v3",
+        "pct_par_v3": "Parser v3"
     })
 
+    # Criar gráfico com 4 barras agrupadas
     fig = px.bar(
         g_long, x="ClassificationType", y="% OK", color="Fonte", barmode="group",
-        labels={"ClassificationType": "Classificação"}
+        labels={"ClassificationType": "Classificação"},
+        # Cores opcionais para diferenciação
+        color_discrete_map={
+            "LLM v1": "#ff7f0e",      # laranja
+            "LLM v2": "#2ca02c",      # verde  
+            "LLM v3": "#1f77b4",      # azul
+            "Parser v3": "#d62728"     # vermelho
+        }
     )
     fig.update_traces(hovertemplate="<b>%{x}</b><br>% OK (%{legendgroup}): %{y:.1f}%<extra></extra>")
     fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), yaxis_ticksuffix="%", legend_title_text="")
